@@ -728,7 +728,12 @@ function render(data) {
     const kd = keyData[key];
     const slotEntries = Object.values(kd.slots);
     const maxH = Math.max(...slotEntries.map(s => s.input + s.output));
-    const slotKeys = Object.keys(kd.slots).sort();
+    const slotKeys = Object.keys(kd.slots).sort((a, b) => {
+      const [da, ha] = a.split(' ');
+      const [db, hb] = b.split(' ');
+      if (da !== db) return da.localeCompare(db);
+      return parseInt(ha) - parseInt(hb);
+    });
 
     let hourlyHTML = '';
     slotKeys.forEach(slot => {
@@ -737,12 +742,13 @@ function render(data) {
       const hi = (hd.input / maxH) * 50;
       const ho = (hd.output / maxH) * 50;
       const dateLabel = datePart.slice(5).replace('-', '/');
+      const timeLabel = dateLabel + ' ' + hourPart + ':00';
       hourlyHTML += `
         <div class="hourly-bar-wrap">
           <div class="hourly-bar h-input" style="height:${hi}px;background:var(--accent);opacity:0.8"></div>
           <div class="hourly-bar h-output" style="height:${ho}px;background:var(--accent2);opacity:0.8"></div>
           <div class="hourly-tip">
-            <div style="color:#999;margin-bottom:2px">${dateLabel} ${hourPart}</div>
+            <div style="color:#999;margin-bottom:2px">${timeLabel}</div>
             <div>in: <span style="color:var(--accent)">${hd.input.toLocaleString()}</span> &nbsp; out: <span style="color:var(--accent2)">${hd.output.toLocaleString()}</span></div>
           </div>
         </div>`;
