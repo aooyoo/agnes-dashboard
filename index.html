@@ -567,18 +567,26 @@ function parseCSV(text) {
     const inp = match ? parseInt(match[1]) : 0;
     const out = match ? parseInt(match[2]) : 0;
     const rawHour = parseInt(parts[5].slice(11, 13));
+    const rawMin = parts[5].slice(14, 16);
+    const rawSec = parts[5].slice(17, 19);
     const cstHour = (rawHour + 8) % 24;
     const rawDate = parts[5].slice(0, 10);
+    // If rawHour >= 16, then CST hour rolls over to next day (16+8=24)
     let date = rawDate;
-    const d = new Date(rawDate);
-    d.setHours(d.getHours() + 8);
-    date = d.toISOString().slice(0, 10);
+    if (rawHour >= 16) {
+      const d = new Date(rawDate + 'T00:00:00Z');
+      d.setDate(d.getDate() + 1);
+      date = d.toISOString().slice(0, 10);
+    }
+    // Format CST time string for display (UTC+8)
+    const cstTimeStr = rawDate + ' ' + String(cstHour).padStart(2, '0') + ':' + rawMin + ':' + rawSec;
     rows.push({
       key: parts[1],
       input: inp,
       output: out,
       total: inp + out,
-      time: new Date(parts[5].slice(0, 10) + 'T' + String(rawHour).padStart(2, '0') + ':' + parts[5].slice(14, 19) + 'Z'),
+      time: new Date(parts[5]),
+      timeStr: cstTimeStr,
       date: date,
       hour: cstHour,
     });
@@ -592,8 +600,9 @@ function render(data) {
   const totalCalls = data.length;
   const keys = [...new Set(data.map(d => d.key))];
   const dates = [...new Set(data.map(d => d.date))].sort();
-  const firstTime = data[data.length - 1].time.toLocaleString('zh-CN');
-  const lastTime = data[0].time.toLocaleString('zh-CN');
+  // Extract original UTC time strings for display (UTC+8 = CST)
+  const firstTime = data[data.length - 1].timeStr;
+  const lastTime = data[0].timeStr;
 
   const cards = [
     { label: '总调用次数', value: totalCalls.toLocaleString(), sub: `${keys.length} 个 Key` },
@@ -601,7 +610,7 @@ function render(data) {
     { label: 'Output Tokens', value: totalOutput.toLocaleString(), sub: '累计输出' },
     { label: 'Token 总量', value: (totalInput + totalOutput).toLocaleString(), sub: 'Input + Output' },
     { label: '数据范围', value: dates[0], sub: dates[dates.length - 1] },
-    { label: '最新请求', value: lastTime.slice(11, 16), sub: firstTime.slice(11, 16) + ' → ' + lastTime.slice(11, 16) },
+    { label: '数据时间', value: firstTime, sub: `→ ${lastTime}` },
   ];
 
   const html = `
@@ -619,7 +628,7 @@ function render(data) {
   <div class="summary-grid animate-in delay-3">${cards.map(c => `
     <div class="summary-card">
       <div class="card-label">${c.label}</div>
-      <div class="card-value">${c.value}<span class="unit">次</span></div>
+      <div class="card-value">${c.value}<span class="unit"></span></div>
       <div class="card-sub">${c.sub}</div>
     </div>`).join('')}</div>
 
@@ -699,38 +708,41 @@ function render(data) {
       </div>`;
   });
 
-  // Key cards
+  // Key cards — aggregate by (date, hour) so we can show date in tooltip
   const keyData = {};
   data.forEach(d => {
     if (!keyData[d.key]) {
-      keyData[d.key] = { input: 0, output: 0, calls: 0, hours: {} };
+      keyData[d.key] = { input: 0, output: 0, calls: 0, slots: {} };
     }
     keyData[d.key].input += d.input;
     keyData[d.key].output += d.output;
     keyData[d.key].calls++;
-    if (!keyData[d.key].hours[d.hour]) keyData[d.key].hours[d.hour] = { input: 0, output: 0 };
-    keyData[d.key].hours[d.hour].input += d.input;
-    keyData[d.key].hours[d.hour].output += d.output;
+    const slotKey = `${d.date} ${d.hour}:00`;
+    if (!keyData[d.key].slots[slotKey]) keyData[d.key].slots[slotKey] = { input: 0, output: 0 };
+    keyData[d.key].slots[slotKey].input += d.input;
+    keyData[d.key].slots[slotKey].output += d.output;
   });
 
   const keyGrid = document.getElementById('keyGrid');
   keys.forEach(key => {
     const kd = keyData[key];
-    const maxH = Math.max(...Object.values(kd.hours).map(h => h.input + h.output));
-    const hourNums = Object.keys(kd.hours).map(Number).sort((a, b) => a - b);
+    const slotEntries = Object.values(kd.slots);
+    const maxH = Math.max(...slotEntries.map(s => s.input + s.output));
+    const slotKeys = Object.keys(kd.slots).sort();
 
     let hourlyHTML = '';
-    hourNums.forEach(h => {
-      const hd = kd.hours[h];
+    slotKeys.forEach(slot => {
+      const hd = kd.slots[slot];
+      const [datePart, hourPart] = slot.split(' ');
       const hi = (hd.input / maxH) * 50;
       const ho = (hd.output / maxH) * 50;
-      const hourLabel = String(h).padStart(2, '0') + ':00';
+      const dateLabel = datePart.slice(5).replace('-', '/');
       hourlyHTML += `
         <div class="hourly-bar-wrap">
           <div class="hourly-bar h-input" style="height:${hi}px;background:var(--accent);opacity:0.8"></div>
           <div class="hourly-bar h-output" style="height:${ho}px;background:var(--accent2);opacity:0.8"></div>
           <div class="hourly-tip">
-            <div style="color:#999;margin-bottom:2px">${hourLabel}</div>
+            <div style="color:#999;margin-bottom:2px">${dateLabel} ${hourPart}</div>
             <div>in: <span style="color:var(--accent)">${hd.input.toLocaleString()}</span> &nbsp; out: <span style="color:var(--accent2)">${hd.output.toLocaleString()}</span></div>
           </div>
         </div>`;
