@@ -296,6 +296,45 @@
     gap: 1.5rem;
   }
 
+  .section-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .range-picker {
+    display: inline-flex;
+    align-items: center;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 4px;
+    gap: 4px;
+  }
+
+  .range-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    padding: 0.42rem 0.8rem;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease;
+    white-space: nowrap;
+  }
+
+  .range-btn:hover {
+    background: rgba(255,255,255,0.05);
+    color: var(--text);
+  }
+
+  .range-btn.active {
+    background: var(--text);
+    color: var(--bg);
+  }
+
   .key-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -497,6 +536,9 @@
     .daily-bars { height: 160px; }
     .key-grid { grid-template-columns: 1fr; }
     .summary-grid { grid-template-columns: repeat(2, 1fr); }
+    .section-controls { width: 100%; justify-content: flex-end; }
+    .range-picker { width: 100%; justify-content: space-between; }
+    .range-btn { flex: 1; padding-inline: 0.4rem; }
   }
 
   @keyframes fadeInUp {
@@ -595,11 +637,19 @@ function parseCSV(text) {
 }
 
 function render(data) {
+  const KEY_RANGE_OPTIONS = [
+    { id: 'all', label: '全部' },
+    { id: '7d', label: '最近7天', hours: 24 * 7 },
+    { id: '3d', label: '最近3天', hours: 24 * 3 },
+    { id: '24h', label: '最近24小时', hours: 24 },
+  ];
+  const defaultKeyRange = '7d';
   const totalInput = data.reduce((s, d) => s + d.input, 0);
   const totalOutput = data.reduce((s, d) => s + d.output, 0);
   const totalCalls = data.length;
   const keys = [...new Set(data.map(d => d.key))];
   const dates = [...new Set(data.map(d => d.date))].sort();
+  const latestTimeMs = Math.max(...data.map(d => d.time.getTime()));
   // Extract original UTC time strings for display (UTC+8 = CST)
   const firstTime = data[data.length - 1].timeStr;
   const lastTime = data[0].timeStr;
@@ -649,6 +699,14 @@ function render(data) {
     <div class="section-header">
       <h2 class="section-title">Key 分时段用量</h2>
       <div class="section-line"></div>
+      <div class="section-controls">
+        <span class="section-meta" id="keyRangeMeta"></span>
+        <div class="range-picker" id="keyRangePicker">
+          ${KEY_RANGE_OPTIONS.map(option => `
+            <button class="range-btn${option.id === defaultKeyRange ? ' active' : ''}" data-range="${option.id}">${option.label}</button>
+          `).join('')}
+        </div>
+      </div>
     </div>
     <div class="key-grid" id="keyGrid"></div>
   </div>
@@ -708,78 +766,122 @@ function render(data) {
       </div>`;
   });
 
-  // Key cards — aggregate by (date, hour) so we can show date in tooltip
+  const keyGrid = document.getElementById('keyGrid');
+  const keyRangeMeta = document.getElementById('keyRangeMeta');
+  const keyRangeButtons = [...document.querySelectorAll('#keyRangePicker .range-btn')];
+
+  function filterKeyRange(rangeId) {
+    if (rangeId === 'all') return data;
+    const option = KEY_RANGE_OPTIONS.find(item => item.id === rangeId);
+    if (!option) return data;
+    const minTime = latestTimeMs - option.hours * 60 * 60 * 1000;
+    return data.filter(item => item.time.getTime() >= minTime);
+  }
+
+  function renderKeySection(rangeId) {
+    const filteredData = filterKeyRange(rangeId);
+    const keyData = {};
+
+    filteredData.forEach(d => {
+      if (!keyData[d.key]) {
+        keyData[d.key] = { input: 0, output: 0, calls: 0, slots: {} };
+      }
+      keyData[d.key].input += d.input;
+      keyData[d.key].output += d.output;
+      keyData[d.key].calls++;
+      const slotKey = `${d.date} ${d.hour}:00`;
+      if (!keyData[d.key].slots[slotKey]) keyData[d.key].slots[slotKey] = { input: 0, output: 0 };
+      keyData[d.key].slots[slotKey].input += d.input;
+      keyData[d.key].slots[slotKey].output += d.output;
+    });
+
+    const filteredKeys = Object.keys(keyData).sort();
+    const filteredDates = [...new Set(filteredData.map(item => item.date))].sort();
+    const rangeLabel = KEY_RANGE_OPTIONS.find(item => item.id === rangeId)?.label || '全部';
+
+    if (filteredData.length === 0) {
+      keyRangeMeta.textContent = `${rangeLabel} · 0 条记录`;
+      keyGrid.innerHTML = `<div class="key-card"><div class="key-count">当前范围内没有数据</div></div>`;
+      return;
+    }
+
+    keyRangeMeta.textContent = `${rangeLabel} · ${filteredData.length} 条记录 · ${filteredKeys.length} 个 Key · ${filteredDates[0]} → ${filteredDates[filteredDates.length - 1]}`;
+
+    keyGrid.innerHTML = filteredKeys.map(key => {
+      const kd = keyData[key];
+      const slotEntries = Object.values(kd.slots);
+      const maxH = Math.max(...slotEntries.map(s => s.input + s.output), 1);
+      const slotKeys = Object.keys(kd.slots).sort((a, b) => {
+        const [da, ha] = a.split(' ');
+        const [db, hb] = b.split(' ');
+        if (da !== db) return da.localeCompare(db);
+        return parseInt(ha, 10) - parseInt(hb, 10);
+      });
+
+      const hourlyHTML = slotKeys.map(slot => {
+        const hd = kd.slots[slot];
+        const [datePart, hourPart] = slot.split(' ');
+        const hi = (hd.input / maxH) * 50;
+        const ho = (hd.output / maxH) * 50;
+        const dateLabel = datePart.slice(5).replace('-', '/');
+        const timeLabel = dateLabel + ' ' + hourPart + ':00';
+        return `
+          <div class="hourly-bar-wrap">
+            <div class="hourly-bar h-input" style="height:${hi}px;background:var(--accent);opacity:0.8"></div>
+            <div class="hourly-bar h-output" style="height:${ho}px;background:var(--accent2);opacity:0.8"></div>
+            <div class="hourly-tip">
+              <div style="color:#999;margin-bottom:2px">${timeLabel}</div>
+              <div>in: <span style="color:var(--accent)">${hd.input.toLocaleString()}</span> &nbsp; out: <span style="color:var(--accent2)">${hd.output.toLocaleString()}</span></div>
+            </div>
+          </div>`;
+      }).join('');
+
+      return `
+        <div class="key-card">
+          <div class="key-card-header">
+            <span class="key-name">${key}</span>
+            <span class="key-count">${kd.calls} calls</span>
+          </div>
+          <div class="key-totals">
+            <div class="key-total-item">
+              <span class="key-total-label">Input</span>
+              <span class="key-total-val input-color">${kd.input.toLocaleString()}</span>
+            </div>
+            <div class="key-total-item">
+              <span class="key-total-label">Output</span>
+              <span class="key-total-val output-color">${kd.output.toLocaleString()}</span>
+            </div>
+            <div class="key-total-item">
+              <span class="key-total-label">Total</span>
+              <span class="key-total-val">${(kd.input + kd.output).toLocaleString()}</span>
+            </div>
+          </div>
+          <div class="hourly-bars">${hourlyHTML}</div>
+        </div>`;
+    }).join('');
+  }
+
+  keyRangeButtons.forEach(button => {
+    button.addEventListener('click', () => {
+      const nextRange = button.dataset.range;
+      keyRangeButtons.forEach(item => item.classList.toggle('active', item === button));
+      renderKeySection(nextRange);
+    });
+  });
+
+  renderKeySection(defaultKeyRange);
+
+  // Token table
+  const tokenBody = document.getElementById('tokenBody');
   const keyData = {};
   data.forEach(d => {
     if (!keyData[d.key]) {
-      keyData[d.key] = { input: 0, output: 0, calls: 0, slots: {} };
+      keyData[d.key] = { input: 0, output: 0, calls: 0 };
     }
     keyData[d.key].input += d.input;
     keyData[d.key].output += d.output;
     keyData[d.key].calls++;
-    const slotKey = `${d.date} ${d.hour}:00`;
-    if (!keyData[d.key].slots[slotKey]) keyData[d.key].slots[slotKey] = { input: 0, output: 0 };
-    keyData[d.key].slots[slotKey].input += d.input;
-    keyData[d.key].slots[slotKey].output += d.output;
   });
-
-  const keyGrid = document.getElementById('keyGrid');
-  keys.forEach(key => {
-    const kd = keyData[key];
-    const slotEntries = Object.values(kd.slots);
-    const maxH = Math.max(...slotEntries.map(s => s.input + s.output));
-    const slotKeys = Object.keys(kd.slots).sort((a, b) => {
-      const [da, ha] = a.split(' ');
-      const [db, hb] = b.split(' ');
-      if (da !== db) return da.localeCompare(db);
-      return parseInt(ha) - parseInt(hb);
-    });
-
-    let hourlyHTML = '';
-    slotKeys.forEach(slot => {
-      const hd = kd.slots[slot];
-      const [datePart, hourPart] = slot.split(' ');
-      const hi = (hd.input / maxH) * 50;
-      const ho = (hd.output / maxH) * 50;
-      const dateLabel = datePart.slice(5).replace('-', '/');
-      const timeLabel = dateLabel + ' ' + hourPart + ':00';
-      hourlyHTML += `
-        <div class="hourly-bar-wrap">
-          <div class="hourly-bar h-input" style="height:${hi}px;background:var(--accent);opacity:0.8"></div>
-          <div class="hourly-bar h-output" style="height:${ho}px;background:var(--accent2);opacity:0.8"></div>
-          <div class="hourly-tip">
-            <div style="color:#999;margin-bottom:2px">${timeLabel}</div>
-            <div>in: <span style="color:var(--accent)">${hd.input.toLocaleString()}</span> &nbsp; out: <span style="color:var(--accent2)">${hd.output.toLocaleString()}</span></div>
-          </div>
-        </div>`;
-    });
-
-    keyGrid.innerHTML += `
-      <div class="key-card">
-        <div class="key-card-header">
-          <span class="key-name">${key}</span>
-          <span class="key-count">${kd.calls} calls</span>
-        </div>
-        <div class="key-totals">
-          <div class="key-total-item">
-            <span class="key-total-label">Input</span>
-            <span class="key-total-val input-color">${kd.input.toLocaleString()}</span>
-          </div>
-          <div class="key-total-item">
-            <span class="key-total-label">Output</span>
-            <span class="key-total-val output-color">${kd.output.toLocaleString()}</span>
-          </div>
-          <div class="key-total-item">
-            <span class="key-total-label">Total</span>
-            <span class="key-total-val">${(kd.input + kd.output).toLocaleString()}</span>
-          </div>
-        </div>
-        <div class="hourly-bars">${hourlyHTML}</div>
-      </div>`;
-  });
-
-  // Token table
-  const tokenBody = document.getElementById('tokenBody');
   keys.forEach(key => {
     const kd = keyData[key];
     tokenBody.innerHTML += `
